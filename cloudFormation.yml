@@ -1,0 +1,429 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation ekvivalent za Terraform ISO Projekat'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'iso-projekat'
+    Description: 'Name of the project'
+
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Default: 'ami-05cf1e9f73fbad2e2'
+    Description: 'Ubuntu 24.04 AMI ID'
+
+  InstanceType:
+    Type: String
+    Default: 't2.micro'
+    Description: 'EC2 instance type'
+
+  DbPassword:
+    Type: String
+    NoEcho: true
+    Default: 'adminpassword123'
+    Description: 'RDS root password'
+
+  RepoUrl:
+    Type: String
+    Default: 'https://github.com/amar-kesetovic/iso-projekat-docker.git'
+    Description: 'GitHub repository URL'
+
+Mappings:
+  AZMapping:
+    us-east-1:
+      AZ0: 'us-east-1a'
+      AZ1: 'us-east-1b'
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: '10.0.0.0/16'
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-vpc'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-igw'
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet0:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: '10.0.1.0/24'
+      AvailabilityZone: !FindInMap [AZMapping, !Ref 'AWS::Region', AZ0]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-0'
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: '10.0.2.0/24'
+      AvailabilityZone: !FindInMap [AZMapping, !Ref 'AWS::Region', AZ1]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-1'
+
+  PrivateSubnet0:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: '10.0.10.0/24'
+      AvailabilityZone: !FindInMap [AZMapping, !Ref 'AWS::Region', AZ0]
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-0'
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: '10.0.11.0/24'
+      AvailabilityZone: !FindInMap [AZMapping, !Ref 'AWS::Region', AZ1]
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-1'
+
+  NatEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-nat-eip'
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref PublicSubnet0
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-nat-gw'
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-rt'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-rt'
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !Ref NatGateway
+
+  PublicSubnet0Association:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet0
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet1Association:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateSubnet0Association:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet0
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet1Association:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'ALB Security Group'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: '0.0.0.0/0'
+
+  FrontendSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Frontend Security Group'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: '0.0.0.0/0'
+
+  BackendSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Backend Security Group'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: '0.0.0.0/0'
+
+  RdsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'RDS Security Group'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref BackendSecurityGroup
+
+
+  AssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'iso-assets-${AWS::AccountId}-${AWS::Region}' 
+
+  AssetsBucketPublicAccessBlock:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AssetsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub '${AssetsBucket.Arn}/*'
+
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: 'Main DB Subnet Group'
+      SubnetIds:
+        - !Ref PrivateSubnet0
+          !Ref PrivateSubnet1
+
+  PostgresDBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: 'iso-db'
+      DBInstanceClass: 'db.t3.micro'
+      Engine: 'postgres'
+      AllocatedStorage: '20'
+      DBName: 'postgres'
+      MasterUsername: 'postgres'
+      MasterUserPassword: !Ref DbPassword
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RdsSecurityGroup
+      SkipFinalSnapshot: true
+      PubliclyAccessible: false
+
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: 'iso-alb'
+      Scheme: 'internet-facing'
+      Type: 'application'
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Subnets:
+        - !Ref PublicSubnet0
+        - !Ref PublicSubnet1
+
+  FrontendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: 'tg-frontend'
+      Port: 80
+      Protocol: 'HTTP'
+      VpcId: !Ref VPC
+
+  BackendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: 'tg-backend'
+      Port: 8000
+      Protocol: 'HTTP'
+      VpcId: !Ref VPC
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: 'HTTP'
+      DefaultActions:
+        - Type: 'forward'
+          TargetGroupArn: !Ref FrontendTargetGroup
+
+  ApiListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 100
+      Conditions:
+        - Field: 'path-pattern'
+          Values:
+            - '/api/*'
+      Actions:
+        - Type: 'forward'
+          TargetGroupArn: !Ref BackendTargetGroup
+
+
+  BackendLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${ProjectName}-backend-lt'
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: !Ref InstanceType
+        NetworkInterfaces:
+          - AssociatePublicIpAddress: false
+            DeviceIndex: 0
+            Groups:
+              - !Ref BackendSecurityGroup
+        IamInstanceProfile:
+          Name: 'LabInstanceProfile' 
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            apt-get update -y
+            apt-get install -y git curl wget
+            curl -fsSL https://get.docker.com -o get-docker.sh
+            sh get-docker.sh
+            usermod -aG docker ubuntu
+            systemctl enable docker
+            systemctl start docker
+
+            cd /home/ubuntu
+            git clone ${RepoUrl}
+            cd iso-projekat-docker
+
+            cat <<EOT > .env
+            DATABASE_URL=postgresql://postgres:${DbPassword}@${PostgresDBInstance.Endpoint.Address}:5432/postgres
+            S3_REGION=${AWS::Region}
+            EOT
+
+            docker compose -f docker-compose.prod.yml up -d backend
+
+  BackendAsg:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      DesiredCapacity: '2'
+      MaxSize: '4'
+      MinSize: '2'
+      TargetGroupARNs:
+        - !Ref BackendTargetGroup
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet0
+        - !Ref PrivateSubnet1
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BackendLaunchTemplate
+        Version: !GetAtt BackendLaunchTemplate.LatestVersionNumber
+
+
+  FrontendInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PublicSubnet0
+      SecurityGroupIds:
+        - !Ref FrontendSecurityGroup
+      IamInstanceProfile: 'LabInstanceProfile'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-frontend'
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt-get update -y
+          apt-get install -y git curl wget
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sh get-docker.sh
+          usermod -aG docker ubuntu
+          systemctl enable docker
+          systemctl start docker
+
+          cd /home/ubuntu
+          git clone ${RepoUrl}
+          cd iso-projekat-docker
+
+          cat <<EOT > .env
+          VITE_API_URL=http://${ApplicationLoadBalancer.DNSName}/api
+          EOT
+
+          docker compose -f docker-compose.prod.yml up -d frontend
+
+  FrontendTargetGroupAttachment:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroupAttachment
+    Properties:
+      TargetGroupArn: !Ref FrontendTargetGroup
+      TargetId: !Ref FrontendInstance
+      Port: 80
+
+Outputs:
+  AlbDnsName:
+    Description: 'The DNS name of the load balancer'
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+  S3BucketName:
+    Description: 'The name of the S3 bucket'
+    Value: !Ref AssetsBucket
+
+  RdsEndpoint:
+    Description: 'The connection endpoint for RDS'
+    Value: !GetAtt PostgresDBInstance.Endpoint.Address
